@@ -15,12 +15,12 @@ dependencies beyond the coreutils you already have.
 Hover for a detail tooltip with exact figures, real byte counts and CPU
 temperature — the bar rounds, the tooltip does not:
 
-![tooltip shown on hover](tooltip.png)
+![tooltip shown on hover](hover.png)
 
 Click to open `btop`. Colors come from the active Omarchy theme, so the widget
 and its tooltip re-theme with everything else:
 
-![sysmon in the Omarchy bar, with btop open](screenshot.png)
+![sysmon in the Omarchy bar, with btop open](btop.png)
 
 ## Install
 
