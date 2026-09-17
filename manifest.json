@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "id": "rfaile313.menu-sysmon",
+  "name": "Menu Sysmon",
+  "version": "1.0.0",
+  "author": "rfaile313",
+  "description": "System monitor bar widget for Omarchy: live CPU, RAM, disk, network throughput, fan RPM and CPU temperature, read straight from /proc and /sys with no daemon and no dependencies.",
+  "homepage": "https://github.com/rfaile313/omarchy-menu-sysmon",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Menu Sysmon",
+    "description": "CPU, RAM, disk, network and fan usage in the bar",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "fields": "cpu,ram,disk,net,fan",
+      "interval": 3,
+      "onClick": "omarchy-launch-or-focus-tui btop"
+    },
+    "schema": [
+      {
+        "key": "fields",
+        "type": "string",
+        "label": "Fields",
+        "description": "Comma-separated metrics to show, in order: cpu, ram, disk, net, fan."
+      },
+      {
+        "key": "interval",
+        "type": "number",
+        "label": "Refresh interval",
+        "description": "Seconds between samples. CPU and network rates are averaged over this window."
+      },
+      {
+        "key": "onClick",
+        "type": "string",
+        "label": "Left click",
+        "description": "Shell command to run on left click."
+      },
+      {
+        "key": "onRightClick",
+        "type": "string",
+        "label": "Right click",
+        "description": "Shell command to run on right click."
+      },
+      {
+        "key": "warnThreshold",
+        "type": "number",
+        "label": "Warn at %",
+        "description": "Highlight the widget when CPU, RAM or disk passes this percentage."
+      }
+    ]
+  }
+}

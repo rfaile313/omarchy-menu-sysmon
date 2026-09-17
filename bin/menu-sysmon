@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Omarchy bar widget: CPU / RAM / disk / net / fan readout.
+# Prints a Waybar-style JSON object. Called on an interval by Widget.qml.
+#
+# Everything is read from /proc and /sys. Sources are probed rather than
+# assumed, so the same script works on Intel, AMD and ARM, with or without
+# fans and temperature sensors; fields with no backing hardware drop out.
+set -uo pipefail
+
+# Fields to render, comma-separated, in this order. Default: everything.
+FIELDS="${1:-cpu,ram,disk,net,fan}"
+has() { [[ ",$FIELDS," == *",$1,"* ]]; }
+
+# Percentage at which the widget flags itself as busy.
+WARN="${2:-75}"
+
+# Per-instance state, so two widgets with different field sets do not fight
+# over each other's CPU/network deltas.
+_key=$(printf '%s' "$FIELDS" | cksum | cut -d' ' -f1)
+state="${XDG_RUNTIME_DIR:-/tmp}/omarchy-menu-sysmon.${_key}.state"
+now=$(date +%s%3N)
+
+prev_t=0 prev_total=0 prev_busy=0 prev_rx=0 prev_tx=0
+[[ -r $state ]] && read -r prev_t prev_total prev_busy prev_rx prev_tx < "$state"
+elapsed_ms=$((now - prev_t))
+
+# --- CPU: busy percentage since the previous run -----------------------------
+# Parsed with awk so a kernel that reports fewer columns (no steal/guest) still
+# adds up instead of erroring on an empty field.
+read -r busy total < <(awk '/^cpu /{
+  b = $2 + $3 + $4 + $7 + $8 + $9
+  print b, b + $5 + $6
+  exit
+}' /proc/stat)
+: "${busy:=0}" "${total:=0}"
+
+cpu=0
+if ((prev_t > 0)); then
+  dt=$((total - prev_total)); db=$((busy - prev_busy))
+  ((dt > 0)) && cpu=$((100 * db / dt))
+fi
+((cpu > 100)) && cpu=100
+((cpu < 0)) && cpu=0
+
+# --- Network: every physical interface ---------------------------------------
+# Virtual devices (bridges, veth, docker, tun/VPN) are skipped: their traffic
+# also crosses a physical NIC, so counting both double-reports it.
+rx=0 tx=0
+for dev in /sys/class/net/*; do
+  [[ -e $dev ]] || continue
+  [[ ${dev##*/} == lo ]] && continue
+  [[ $(readlink -f "$dev") == */devices/virtual/* ]] && continue
+  [[ -r $dev/statistics/rx_bytes && -r $dev/statistics/tx_bytes ]] || continue
+  rx=$((rx + $(<"$dev/statistics/rx_bytes")))
+  tx=$((tx + $(<"$dev/statistics/tx_bytes")))
+done
+
+rate() { # bytes-delta -> human rate per second
+  awk -v b="$1" -v ms="$elapsed_ms" 'BEGIN{
+    if (ms <= 0 || b < 0) { printf "0B"; exit }
+    r = b * 1000 / ms
+    if (r >= 1048576) printf "%.1fM", r/1048576
+    else if (r >= 1024) printf "%.0fK", r/1024
+    else printf "%.0fB", r
+  }'
+}
+down="0B" up="0B"
+if ((prev_t > 0 && rx >= prev_rx && tx >= prev_tx)); then
+  down=$(rate $((rx - prev_rx)))
+  up=$(rate $((tx - prev_tx)))
+fi
+
+printf '%s %s %s %s %s\n' "$now" "$total" "$busy" "$rx" "$tx" > "$state"
+
+# --- RAM ---------------------------------------------------------------------
+mt=$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo)
+ma=$(awk '/^MemAvailable:/{print $2; exit}' /proc/meminfo)
+# MemAvailable landed in Linux 3.14; approximate it on anything older.
+[[ -z ${ma:-} ]] && ma=$(awk '/^MemFree:|^Buffers:|^Cached:/{s+=$2} END{print s+0}' /proc/meminfo)
+: "${mt:=0}" "${ma:=0}"
+
+mem=0 mem_used=0 mem_tot=0
+if ((mt > 0)); then
+  ((ma > mt)) && ma=$mt
+  mem=$((100 * (mt - ma) / mt))
+  mem_used=$(awk -v t="$mt" -v a="$ma" 'BEGIN{printf "%.1f", (t-a)/1048576}')
+  mem_tot=$(awk -v t="$mt" 'BEGIN{printf "%.1f", t/1048576}')
+fi
+
+# --- Disk (root filesystem) --------------------------------------------------
+# -P forces single-line POSIX output, so a long device name cannot wrap and
+# shift the columns.
+read -r disk_pct disk_used disk_free < <(
+  df -hP / 2>/dev/null | awk 'NR==2{gsub(/%/,"",$5); print $5+0, $3, $4; exit}'
+)
+: "${disk_pct:=0}" "${disk_used:=?}" "${disk_free:=?}"
+
+# --- Fan ---------------------------------------------------------------------
+# Apple hardware first: applesmc registers an hwmon node that contains no
+# fan*_input, so its fan is only reachable through the platform path and the
+# generic hwmon glob alone finds nothing.
+fan="" fan_max=""
+for f in /sys/devices/platform/applesmc.*/fan1_input; do
+  [[ -r $f ]] || continue
+  fan=$(<"$f")
+  [[ -r ${f%_input}_max ]] && fan_max=$(<"${f%_input}_max")
+  break
+done
+# Otherwise report the fastest-spinning fan any hwmon driver exposes, which on
+# a multi-fan desktop is the one actually doing the work.
+if [[ -z $fan ]]; then
+  for f in /sys/class/hwmon/hwmon*/fan*_input; do
+    [[ -r $f ]] || continue
+    v=$(<"$f") || continue
+    [[ $v =~ ^[0-9]+$ ]] || continue
+    if [[ -z $fan ]] || ((v > fan)); then
+      fan=$v
+      fan_max=""
+      [[ -r ${f%_input}_max ]] && fan_max=$(<"${f%_input}_max")
+    fi
+  done
+fi
+
+# --- CPU temperature ---------------------------------------------------------
+# Best source first: Intel, AMD, AMD (out-of-tree), ARM/SoC, generic ACPI.
+temp=""
+for want in coretemp k10temp zenpower cpu_thermal acpitz; do
+  for h in /sys/class/hwmon/hwmon*; do
+    [[ -r $h/name ]] || continue
+    [[ $(<"$h/name") == "$want" ]] || continue
+    for t in "$h"/temp*_input; do
+      [[ -r $t ]] || continue
+      v=$(<"$t"); [[ $v =~ ^[0-9]+$ ]] || continue
+      temp=$((v / 1000)); break
+    done
+    [[ -n $temp ]] && break
+  done
+  [[ -n $temp ]] && break
+done
+# Last resort: the kernel's own thermal zones.
+if [[ -z $temp ]]; then
+  for t in /sys/class/thermal/thermal_zone*/temp; do
+    [[ -r $t ]] || continue
+    v=$(<"$t"); [[ $v =~ ^[0-9]+$ ]] || continue
+    temp=$((v / 1000)); break
+  done
+fi
+# Discard implausible readings rather than print nonsense.
+[[ -n $temp ]] && { ((temp < 1 || temp > 150)) && temp=""; }
+
+# --- Bar text ----------------------------------------------------------------
+text=""
+add() { [[ -n $text ]] && text+=" "; text+="$1"; }
+has cpu  && add "$(printf '\U000F0EE0 %d%%' "$cpu")"
+has ram  && add "$(printf '\U000F035B %d%%' "$mem")"
+has disk && add "$(printf '\U000F02CA %s%%' "$disk_pct")"
+has net  && add "$(printf '\U000F01DA %s \U000F0552 %s' "$down" "$up")"
+if has fan && [[ -n $fan ]]; then add "$(printf '\U000F0210 %s' "$fan")"; fi
+
+# --- Severity drives the theme class -----------------------------------------
+worst=$cpu
+((mem > worst)) && worst=$mem
+((disk_pct > worst)) && worst=$disk_pct
+class=normal
+((worst >= WARN)) && class=warning
+((worst >= WARN + 15)) && class=critical
+
+tooltip="CPU  ${cpu}%"
+[[ -n $temp ]] && tooltip+="  (${temp}°C)"
+tooltip+="\nRAM  ${mem}%  (${mem_used} / ${mem_tot} GiB)"
+tooltip+="\nDisk ${disk_pct}%  (${disk_used} used, ${disk_free} free on /)"
+tooltip+="\nNet  ${down}/s down  ${up}/s up"
+[[ -n $fan ]] && tooltip+="\nFan  ${fan} RPM${fan_max:+ (max ${fan_max})}"
+
+printf '{"text":"%s","tooltip":"%s","class":"%s"}\n' "$text" "$tooltip" "$class"
