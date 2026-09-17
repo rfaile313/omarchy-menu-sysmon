@@ -12,8 +12,13 @@ dependencies beyond the coreutils you already have.
  CPU     RAM    disk   down  up      fan
 ```
 
-Hover for a detail tooltip with exact figures and CPU temperature; click to open
-`btop`:
+Hover for a detail tooltip with exact figures, real byte counts and CPU
+temperature — the bar rounds, the tooltip does not:
+
+![tooltip shown on hover](tooltip.png)
+
+Click to open `btop`. Colors come from the active Omarchy theme, so the widget
+and its tooltip re-theme with everything else:
 
 ![sysmon in the Omarchy bar, with btop open](screenshot.png)
 
